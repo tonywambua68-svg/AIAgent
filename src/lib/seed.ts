@@ -243,5 +243,9 @@ export function buildSeed(): AppState {
     opportunities: buildOpportunities(),
     sessionId: uid() + uid(),
     bootedAt: now(),
+    compActions: [],
+    devServices: [],
+    captures: [],
+    compSettings: { testMode: true, retention: 20, autoTimeoutMs: 8000 },
   };
 }

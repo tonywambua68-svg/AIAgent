@@ -8,13 +8,15 @@ import CommandCenter from "./components/CommandCenter";
 import Business from "./components/Business";
 import { ProjectsSection, TasksSection, LearningSection } from "./components/Operations";
 import Analytics from "./components/Analytics";
+import ComputerControl from "./components/ComputerControl";
 import { MemorySection, IntegrationsSection, SecuritySection, SettingsSection } from "./components/System";
+import { emergencyStop, isPlanRunning } from "./lib/computer";
 import {
   Logo, Badge, IcTerminal, IcStore, IcFolder, IcCheck, IcBook, IcChart, IcDb, IcPlug,
-  IcShield, IcGear, IcBell, IcVol, IcVolX, IcMenu, IcX, IcZap, IcPlay, IcMic, IcWarn,
+  IcShield, IcGear, IcBell, IcVol, IcVolX, IcMenu, IcX, IcZap, IcPlay, IcMic, IcChip,
 } from "./components/ui";
 
-type SectionId = "command" | "business" | "projects" | "tasks" | "learning" | "analytics" | "memory" | "integrations" | "security" | "settings";
+type SectionId = "command" | "business" | "projects" | "tasks" | "learning" | "analytics" | "computer" | "memory" | "integrations" | "security" | "settings";
 
 const NAV: { id: SectionId; label: string; icon: (p: { size?: number }) => ReactNode }[] = [
   { id: "command", label: "Command Center", icon: IcTerminal },
@@ -23,6 +25,7 @@ const NAV: { id: SectionId; label: string; icon: (p: { size?: number }) => React
   { id: "tasks", label: "Tasks", icon: IcCheck },
   { id: "learning", label: "Learning", icon: IcBook },
   { id: "analytics", label: "Analytics", icon: IcChart },
+  { id: "computer", label: "Computer", icon: IcChip },
   { id: "memory", label: "Memory", icon: IcDb },
   { id: "integrations", label: "Integrations", icon: IcPlug },
   { id: "security", label: "Security", icon: IcShield },
@@ -31,7 +34,7 @@ const NAV: { id: SectionId; label: string; icon: (p: { size?: number }) => React
 
 const TITLES: Record<SectionId, string> = {
   command: "COMMAND CENTER", business: "BUSINESS OPS", projects: "PROJECTS", tasks: "TASK QUEUE",
-  learning: "LEARNING ENGINE", analytics: "ANALYTICS", memory: "MEMORY VAULT",
+  learning: "LEARNING ENGINE", analytics: "ANALYTICS", computer: "COMPUTER CONTROL", memory: "MEMORY VAULT",
   integrations: "INTEGRATIONS", security: "SECURITY & AUDIT", settings: "SETTINGS",
 };
 
@@ -187,6 +190,23 @@ export default function App() {
   useEffect(() => {
     const iv = setInterval(() => setClock(new Date()), 1000);
     return () => clearInterval(iv);
+  }, []);
+
+  /* tab title mirrors the active section — this is the "active window" captures will see */
+  useEffect(() => {
+    document.title = `JARVIS OS — ${TITLES[section]}`;
+  }, [section]);
+
+  /* emergency stop shortcuts (module 83): Esc or Ctrl+. while a plan is executing */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.key === "Escape" || (e.ctrlKey && e.key === ".")) && isPlanRunning()) {
+        emergencyStop.stop("keyboard shortcut");
+        sfx.error();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   /* audio settings sync */
@@ -353,6 +373,7 @@ export default function App() {
             {section === "tasks" && <TasksSection />}
             {section === "learning" && <LearningSection />}
             {section === "analytics" && <Analytics />}
+            {section === "computer" && <ComputerControl />}
             {section === "memory" && <MemorySection />}
             {section === "integrations" && <IntegrationsSection />}
             {section === "security" && <SecuritySection />}

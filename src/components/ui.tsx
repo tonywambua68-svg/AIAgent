@@ -40,6 +40,10 @@ export const IcChevD = (p: IconProps) => <I {...p} d="M6 9l6 6 6-6" />;
 export const IcClock = (p: IconProps) => <I {...p} d="M12 3a9 9 0 100 18 9 9 0 000-18zM12 7v5l3 3" />;
 export const IcMenu = (p: IconProps) => <I {...p} d="M4 6h16M4 12h16M4 18h16" />;
 export const IcArrow = (p: IconProps) => <I {...p} d="M5 12h14M13 6l6 6-6 6" />;
+export const IcChip = (p: IconProps) => <I {...p} d="M9 9h6v6H9zM5 5h14v14H5zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3" />;
+export const IcMonitor = (p: IconProps) => <I {...p} d="M3 5h18v11H3zM8 20h8M12 16v4" />;
+export const IcStopSq = (p: IconProps) => <I {...p} d="M7 7h10v10H7z" fill />;
+export const IcCam = (p: IconProps) => <I {...p} d="M4 8h4l2-3h4l2 3h4v11H4zM12 11a2.5 2.5 0 100 5 2.5 2.5 0 000-5z" />;
 
 export const Logo = ({ size = 26 }: { size?: number }) => (
   <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden>

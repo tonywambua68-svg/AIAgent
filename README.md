@@ -93,3 +93,40 @@ pricing advisor, opportunities, expenses, customers) · `Operations` (Projects/T
 No secrets in source. Credentials are masked after storage and flagged as dev-mode-only.
 HIGH-risk actions (memory wipe, factory reset, price changes) require explicit confirmation and
 are audit-logged with `confirmed: true`. Destructive operations are never performed silently.
+
+## Computer Control subsystem (modules 60-96)
+
+New section: **Computer** in the sidebar, driven by `src/lib/computer.ts`.
+
+**Execution model.** Every significant command follows OBSERVE → PLAN → ACT → OBSERVE → VERIFY.
+The executor enforces per-action timeouts (`compSettings.autoTimeoutMs`), loop protection
+(3 identical failures → stop + explain), and checks the emergency-stop flag between every step.
+
+**What is REAL in the browser sandbox:**
+- Screen capture via `getDisplayMedia` (screen/window/tab), retention-limited, permission-gated
+- System vitals: cores, JS heap, storage quota/usage, network, DPR + display geometry,
+  `screen.isExtended` multi-monitor detection, event-loop latency probe
+- Sandboxed terminal: `ls/tree/cat/git status/git diff/npm test/npm run dev/ps/kill…` execute
+  for real against the project model; every command is risk-classified first
+- Dev-service lifecycle with streamed boot logs
+- Mic enumeration by device ID (never hard-coded indexes)
+
+**What is PLAN + DEMONSTRATE (TEST MODE, honestly labelled):**
+native mouse/keyboard/window/app launching. These produce step-by-step plans marked TEST,
+logged to the Computer Action Log and the audit trail — never reported as executed.
+
+**Permission levels.** L0 OBSERVE · L1 SAFE ACTION · L2 MODIFICATION · L3 HIGH RISK (always
+confirms). Destructive commands (`rm`, `del`, `format`, `DROP TABLE`, `sudo`, fork bombs) are
+blocked at the classifier and demonstrated only; `git push` runs a pre-push secret scan that
+flags `.env`-style credential files.
+
+**Emergency stop.** Dashboard button (two-stage confirm), `Esc` / `Ctrl+.` while a plan runs,
+or say "JARVIS, stop". After a stop, nothing resumes until a new command is issued.
+
+**Cross-platform design.** `osAdapters()` declares Windows (UIAutomation + SendInput), Linux
+(AT-SPI + xdotool), macOS (Accessibility API + CGEvent) companion-agent requirements. The
+planner/verifier layer is OS-agnostic — attaching the native agent changes nothing upstream.
+
+**Try:** "run my project" (streams the verify loop) · "find the error" (diagnose → confirm →
+fix → re-test) · "stop the server" (confirm-gated kill) · "delete this folder" (L3 gate demo) ·
+"take a screenshot" (real) · "is node installed" · "git status" · "find laptop suppliers".

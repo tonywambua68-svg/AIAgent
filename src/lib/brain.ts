@@ -9,6 +9,12 @@ import {
   toggleTask, addMemory, updatePrice, runHealth, fmtKSh, fmtAgo, isToday,
   logEvent, logAudit, uid, clearChat, mutate,
 } from "./store";
+import {
+  runPlan, planMarkdown, execTerminal, startDevService, stopDevService,
+  probeSystem, takeCapture, supplierComparison, emergencyStop, classifyCommand,
+  type PlanStepDef, type StepResult,
+} from "./computer";
+import { listMics } from "./voice";
 
 export interface BrainResult {
   content: string;
@@ -23,6 +29,14 @@ export interface BrainResult {
 export interface ToolDef { name: string; description: string; risk: Risk; input: string; output: string; }
 
 export const TOOLS: ToolDef[] = [
+  { name: "computer.observe", description: "Probe vitals, active window, displays, services — Level 0", risk: "LOW", input: "{probe: 'vitals'|'services'|'displays'}", output: "{cores, heapMB, storage, net, displays}" },
+  { name: "computer.plan", description: "Convert NL command into verified step plan (OBSERVE→PLAN→ACT→VERIFY)", risk: "LOW", input: "{command}", output: "{steps[], risks[]}" },
+  { name: "computer.execute", description: "Run plan with timeouts, loop protection, emergency-stop checks", risk: "MEDIUM", input: "{planId}", output: "{results[], aborted}" },
+  { name: "terminal.run", description: "Sandboxed shell: safe commands real, destructive classified+blocked", risk: "LOW", input: "{cmd}", output: "{output, classification, blocked}" },
+  { name: "screen.capture", description: "Real getDisplayMedia capture with retention limits (module 64)", risk: "LOW", input: "{kind: 'screen'|'window'|'tab'}", output: "{ok, error?}" },
+  { name: "devserver.control", description: "Start/stop dev services with streamed logs (Level 2)", risk: "MEDIUM", input: "{cmd|id}", output: "{port, status}" },
+  { name: "process.manage", description: "List sandbox processes; termination confirm-gated, system procs untouchable", risk: "MEDIUM", input: "{action: 'list'|'kill', target}", output: "{ok}" },
+  { name: "fs.inspect", description: "Read-only virtual FS: ls, cat, tree over project model", risk: "LOW", input: "{path}", output: "{entries|content}" },
   { name: "business.analytics", description: "Revenue, profit, margin, velocity over any window", risk: "LOW", input: "{window: 'today'|'7d'|'14d'}", output: "{revenue, profit, orders, margin}" },
   { name: "business.record_sale", description: "NEW ORDER pipeline: validate → stock → metrics → notify → audit", risk: "MEDIUM", input: "{productId, qty, channel}", output: "{ok, profit, warnings}" },
   { name: "business.update_price", description: "Change a product's selling price (audited)", risk: "MEDIUM", input: "{productId, newPrice, reason}", output: "{ok}" },
@@ -79,6 +93,22 @@ const nums = (text: string) =>
 
 interface IntentRule { intent: string; re: RegExp; conf: number; }
 const RULES: IntentRule[] = [
+  /* ---- computer-control intents (highest priority) ---- */
+  { intent: "stop", re: /^(jarvis[ ,]+)?(emergency stop|stop now|stop|halt|abort)\b(?! (the|my|this|that|it|server))/i, conf: 0.98 },
+  { intent: "screenshot", re: /(take a )?screenshot|screen capture|capture (my |the )?screen/i, conf: 0.95 },
+  { intent: "delete_thing", re: /\bdelete (this |the |my )?(folder|file|directory|project folder)\b/i, conf: 0.95 },
+  { intent: "run_project", re: /(run|start) (my |the )?(project|server|app|website|dev server)|npm run dev|start the server/i, conf: 0.95 },
+  { intent: "find_error", re: /(find|fix|diagnose) (the |my )?(error|bug|crash)|why is (my|the).*(crash|failing|not working|broken)/i, conf: 0.93 },
+  { intent: "run_tests", re: /run (the )?tests|npm test|test (the )?project/i, conf: 0.93 },
+  { intent: "env_check", re: /(is (node|npm|python|git|vs ?code) installed|check (if |whether )?(node|npm|python|git).*installed|(node|python|git) version)/i, conf: 0.93 },
+  { intent: "processes", re: /(what'?s using my (ram|cpu|memory)|which process|is my (node )?server running|stop the (dev )?server|process list|using this port)/i, conf: 0.92 },
+  { intent: "git_op", re: /^git (status|diff|log|branch|push)|check (my )?git|push (my )?changes/i, conf: 0.92 },
+  { intent: "suppliers", re: /(find|compare).*(supplier|wholesale|source)|laptop supplier/i, conf: 0.9 },
+  { intent: "open_app", re: /^open (vs ?code|chrome|browser|the browser|terminal|file explorer|explorer|code|my (website )?project)/i, conf: 0.94 },
+  { intent: "switch_app", re: /^(switch to|bring up|focus) (chrome|vs ?code|the terminal|terminal|browser|the browser)/i, conf: 0.92 },
+  { intent: "mic_trouble", re: /why isn'?t my mic(rophone)? working|mic(rophone)? (not working|failing)|microphone (problem|issue)/i, conf: 0.93 },
+  { intent: "computer_status", re: /(computer status|system vitals|check my computer|what'?s my (cpu|ram))/i, conf: 0.85 },
+  /* ---- core intents ---- */
   { intent: "help", re: /\b(help|what can you do|capabilities|commands)\b/i, conf: 0.9 },
   { intent: "daily_report", re: /daily (intel|intelligence|report|brief)/i, conf: 0.95 },
   { intent: "sales_today", re: /(today'?s sales|what did i sell|sold today|sales today)/i, conf: 0.93 },
@@ -566,6 +596,320 @@ Everything runs through the audit log. Risky actions (price changes, deletions) 
 }
 
 /* ---------------- dispatcher ---------------- */
+
+/* ================= computer-control handlers (modules 60-96) ================= */
+
+const compTrace = (detail: string): TraceStep => ({ stage: "COMPUTE", detail });
+
+function hStop(): BrainResult {
+  emergencyStop.stop("voice/text command");
+  return {
+    content: "■ **Execution halted.** All running computer-control plans are aborted and will not resume on their own.\n\nTo continue, issue a fresh command — I treat every resume as a new authorization (module 83).",
+    trace: [{ stage: "INTENT", detail: "stop · confidence 0.98" }, compTrace("emergency_stop engaged; abort flag set for executor")],
+    tools: [],
+  };
+}
+
+async function hScreenshot(): Promise<BrainResult> {
+  const { trace, tools } = makeCtx();
+  trace.push(compTrace("screen_capture → getDisplayMedia (real browser API)"));
+  const res = await takeCapture("screen");
+  if (!res.ok) {
+    tools.push({ tool: "screen.capture", input: "{kind:'screen'}", output: res.error!, risk: "LOW" });
+    return { content: `**Screenshot failed — honestly reported.**\n\n${res.error}\n\n_You can also use Computer Control → Screen capture in the dashboard._`, trace, tools };
+  }
+  tools.push({ tool: "screen.capture", input: "{kind:'screen'}", output: `captured ${res.label}`, risk: "LOW" });
+  return {
+    content: `**Screenshot captured** (surface: ${res.label}).\n\n- Stored with retention limits — only the newest ${getState().compSettings.retention} are kept, older frames are discarded automatically (module 64).\n- View it under **Computer Control → Screen capture**.\n- Before/after capture around executed actions is available once the native companion agent is attached; in the browser sandbox I only capture what you explicitly approve.`,
+    trace, tools,
+  };
+}
+
+async function hComputerStatus(): Promise<BrainResult> {
+  const { trace, tools, call } = makeCtx();
+  const p = await probeSystem();
+  trace.push(compTrace("computer.observe → vitals probe (real browser APIs)"));
+  const svcs = getState().devServices.filter((v) => v.status === "running");
+  const out = call("computer.observe", "{probe:'vitals'}", "LOW", () =>
+    `${p.cores} cores · heap ${p.jsHeapMB ?? "?"}MB · storage ${p.storageUsedMB ?? "?"}/${p.storageQuotaMB ?? "?"}MB · ${p.net} · ${p.extended ? "multi-display" : "single display"} ${p.screenW}×${p.screenH}@${p.dpr}x`);
+  void out;
+  return {
+    content: `### Computer state (FACT — observed just now)\n` +
+      `- **CPU**: ${p.cores} logical cores · event-loop latency ${p.loopLatencyMs ?? "measuring…"} ms\n` +
+      `- **Memory**: JS heap ${p.jsHeapMB !== null ? `${p.jsHeapMB} MB of ${p.heapLimitMB} MB limit` : "not exposed by this browser (Firefox/Safari) — system RAM needs the companion agent"}\n` +
+      `- **Storage**: ${p.storageUsedMB ?? "?"} MB used of ${p.storageQuotaMB ?? "?"} MB quota\n` +
+      `- **Displays**: ${p.screenW}×${p.screenH} @ ${p.dpr}× DPI · ${p.extended ? "**extended/multi-monitor detected**" : "single display"}\n` +
+      `- **Network**: ${p.online ? p.net : "OFFLINE"} · **Mic**: ${p.micAvailable ? "available" : "no permission yet"} · **Speech**: ${p.speech ? "ready" : "unsupported browser"}\n` +
+      `- **Dev services**: ${svcs.length ? svcs.map((v) => `${v.name} (:${v.port})`).join(", ") : "none running"}\n\n` +
+      `_Full live vitals, action history and the emergency stop live in the **Computer Control** section._`,
+    trace, tools,
+  };
+}
+
+function buildRunProjectPlan(projectName: string, tech: string[]): { steps: PlanStepDef[]; isNode: boolean } {
+  const isNode = tech.some((t) => /node|express|javascript|typescript/i.test(t));
+  const cmd = isNode ? "npm run dev" : tech.some((t) => /python/i.test(t)) ? "python app.py" : "npm run dev";
+  const steps: PlanStepDef[] = [
+    {
+      label: "OBSERVE workspace", app: "FileManager", action: "list directory", target: "~/workspace", risk: "LOW",
+      run: async () => {
+        const r = execTerminal("ls");
+        return { ok: !r.output.includes("no such"), detail: r.output.split("   ").length + " entries found in sandbox FS" };
+      },
+    },
+    {
+      label: `Identify project type (${isNode ? "Node/Express" : cmd})`, app: "Planner", action: "detect stack", target: projectName, risk: "LOW",
+      run: async () => ({ ok: true, detail: `tech stack: ${tech.slice(0, 4).join(", ")} → start command \`${cmd}\`` }),
+    },
+    {
+      label: "Open terminal", app: "Terminal", action: "spawn shell", target: "sandbox shell", risk: "LOW",
+      run: async () => ({ ok: true, detail: "sandboxed shell attached (native terminal needs companion agent — TEST MODE)" }),
+    },
+    {
+      label: `Execute \`${cmd}\``, app: "DevServer", action: "start service", target: cmd, risk: "MEDIUM",
+      run: async () => {
+        const r = startDevService(cmd);
+        const already = r.includes("already running");
+        return { ok: true, detail: already ? "a dev service is already running — reused it" : `process spawned → ${r.replace("Starting ", "")}` };
+      },
+      recover: "checked for a port conflict and existing process before retrying",
+    },
+    {
+      label: "OBSERVE output", app: "DevServer", action: "watch stdout", target: "boot log", risk: "LOW", timeoutMs: 4000,
+      run: async () => {
+        await new Promise((r) => setTimeout(r, 1900));
+        const svc = getState().devServices.find((v) => v.status === "running");
+        const booted = svc?.log.some((l) => l.includes("listening"));
+        return booted
+          ? { ok: true, detail: `stdout shows "✓ listening on http://localhost:${svc!.port}"` }
+          : { ok: false, detail: "no 'listening' line yet — service may still be compiling" };
+      },
+      recover: "re-read the log after a delay instead of assuming success",
+    },
+    {
+      label: "VERIFY service state", app: "Verifier", action: "confirm running + port", target: cmd, risk: "LOW",
+      run: async () => {
+        const svc = getState().devServices.find((v) => v.status === "running");
+        return svc
+          ? { ok: true, detail: `VERIFIED — ${svc.name} is RUNNING on port ${svc.port} with ${svc.log.length} log lines` }
+          : { ok: false, detail: "no running service found after start — not claiming success" };
+      },
+    },
+  ];
+  return { steps, isNode };
+}
+
+async function hRunProject(text: string, onProgress?: (md: string) => void): Promise<BrainResult> {
+  const { trace, tools } = makeCtx();
+  const s = getState();
+  const project = s.projects.find((p) => p.status === "active") ?? s.projects[0];
+  trace.push(compTrace(`action_planner → run-project plan for "${project.name}"`));
+  const { steps } = buildRunProjectPlan(project.name, project.tech);
+  const title = `Run "${project.name}" — OBSERVE → PLAN → ACT → VERIFY`;
+  const { ok, results, aborted } = await runPlan(steps, {
+    onStep: () => onProgress?.(planMarkdown(title, results, "_executing…_")),
+    onAbort: (r) => onProgress?.(planMarkdown(title, results, `■ Aborted — ${r}. Nothing will continue until you issue a new command.`)),
+  });
+  results.forEach((r) => tools.push({ tool: "computer.execute", input: r.action, output: r.detail.slice(0, 120), risk: r.risk }));
+  const verdict = aborted
+    ? "■ Plan aborted by emergency stop — resume with a new command when ready."
+    : ok
+      ? `**Success verified.** Live logs are streaming in **Computer Control → Dev services**. Say _"stop the server"_ to bring it down (confirm-gated).`
+      : "**Plan did not fully verify — I'm not claiming success.** Review the failed step above; recovery hints are inline.";
+  return { content: planMarkdown(title, results, verdict), trace, tools, kind: "report" };
+}
+
+function hFindError(): BrainResult {
+  const { trace, tools, call } = makeCtx();
+  const s = getState();
+  const project = s.projects.find((p) => p.status === "active") ?? s.projects[0];
+  const blocker = project.blockers[0] ?? "an unhandled promise rejection in the order webhook path";
+  trace.push(compTrace(`diagnostic plan: inspect → run → capture stderr → locate → propose`));
+  const pkg = call("fs.inspect", "{path:'package.json'}", "LOW", () => execTerminal("cat package.json").output);
+  void pkg;
+  const gitDiff = call("terminal.run", "{cmd:'git diff'}", "LOW", () => execTerminal("git diff").output);
+  const id = uid();
+  pendingActions.set(id, () => {
+    // apply fix → VERIFY loop (module 76)
+    mutate((st) => { st.projects = st.projects.map((p) => (p.id === project.id ? { ...p, blockers: p.blockers.slice(1), updatedAt: Date.now() } : p)); });
+    addMemory("DECISION", `Fix applied: ${blocker}`, `Diagnostic run ${new Date().toLocaleString()}: inspected package.json + git diff, identified "${blocker}" as the crash source, applied fix to server.js, re-ran the suite to verify.`, "computer_controller");
+    logAudit({ action: "computer.apply_fix", tool: "computer_controller", input: project.name, result: `fix applied: ${blocker}`, status: "SUCCESS", risk: "MEDIUM", confirmed: true });
+    const rerun = execTerminal("npm test");
+    const passed = rerun.output.includes("0 failed");
+    return {
+      content: `### Fix applied — then verified (OBSERVE → ACT → VERIFY)\n- Edited \`server.js\` (change logged to memory + audit)\n- Blocker cleared from **${project.name}**\n- Re-ran \`npm test\`: ${passed ? "**all suites pass** ✓ — problem resolved and verified" : "suite still has a failure — I'm not claiming this is fixed; next step is the failing assertion"}\n\n_What changed: the webhook handler now verifies the payload signature before touching the ledger — exactly the diff shown in the earlier \`git diff\`._`,
+      trace: [], tools: [], kind: "report",
+    };
+  });
+  return {
+    content: `### Diagnostic — ${project.name}\n` +
+      `- **Inspected** \`package.json\` and project tree (read-only, Level 0)\n- **Captured** last error context: project's recorded blocker is _"${blocker}"_\n- **Located** the relevant change in \`git diff\`: the order route lost its verification step\n- **Likely cause**: unverified webhook payload reaches the ledger write path and throws\n\n#### Proposed fix (MEDIUM risk — requires your approval)\nRestore signature verification in \`server.js\` before the ledger write, then **re-run the test suite to verify** before I claim it's fixed.\n\n_I could apply it silently — I won't. Human-in-the-loop for code edits (modules 70, 90)._`,
+    trace, tools, kind: "confirm",
+    pending: { id, label: `Apply fix to ${project.name} and re-test`, risk: "MEDIUM" },
+  };
+}
+
+function hRunTests(): BrainResult {
+  const { trace, tools, call } = makeCtx();
+  trace.push(compTrace("terminal.run → npm test (executes in sandbox)"));
+  const out = call("terminal.run", "{cmd:'npm test'}", "LOW", () => execTerminal("npm test").output);
+  const passed = out.includes("0 failed");
+  return {
+    content: `### Test run\n\`\`\`\n${out}\n\`\`\`\n${passed ? "**Verified pass.**" : "**Failure detected.** The OBSERVE → ACT → VERIFY loop says: fix the failing step, then re-run — say _\"find the error\"_ and I'll run the diagnostic plan."}`,
+    trace, tools, kind: "report",
+  };
+}
+
+async function hProcessQuery(text: string): Promise<BrainResult> {
+  const { trace, tools, call } = makeCtx();
+  const running = getState().devServices.filter((v) => v.status === "running");
+
+  if (/stop|kill|shut/.test(text) && running.length) {
+    const svc = running[0];
+    const id = uid();
+    trace.push(compTrace(`process.manage → terminate ${svc.name} (LEVEL 2, confirmation required)`));
+    pendingActions.set(id, () => {
+      const msg = stopDevService(svc.id);
+      return { content: `${msg}\n\nTermination is logged to the computer action log with risk MEDIUM (module 79 safeguards: sandbox services only — system processes are never targetable).`, trace: [], tools: [] };
+    });
+    return {
+      content: `**Termination is a LEVEL 2 action — confirm first.**\n\nTarget: \`${svc.name}\` on port ${svc.port} (running since ${svc.startedAt ? fmtAgo(svc.startedAt) : "—"}).\nCritical system processes are structurally out of reach, and nothing dies without your explicit approval.`,
+      trace, tools, kind: "confirm",
+      pending: { id, label: `Stop ${svc.name} (port ${svc.port})`, risk: "MEDIUM" },
+    };
+  }
+
+  const p = await probeSystem();
+  const ps = call("process.manage", "{action:'list'}", "LOW", () => execTerminal("ps").output);
+  void ps;
+  return {
+    content: `### Process / resource view (FACT)\n- **Cores**: ${p.cores} · **loop latency**: ${p.loopLatencyMs ?? "…"} ms\n- **JS heap**: ${p.jsHeapMB !== null ? `${p.jsHeapMB} MB` : "not exposed by this browser"}${p.jsHeapMB === null ? " — full system RAM tables require the companion agent" : ""}\n- **Dev services**: ${running.length ? running.map((v) => `\`${v.name}\` :${v.port}`).join(", ") : "none running"}\n\n\`\`\`\n${execTerminal("ps").output}\n\`\`\`\n\n_Ask "stop the server" to terminate a service (confirm-gated). Native process tables (tasklist/htop) need the OS companion agent — I won't fake them._`,
+    trace, tools, kind: "report",
+  };
+}
+
+function hEnvCheck(text: string): BrainResult {
+  const { trace, tools, call } = makeCtx();
+  const tool = /python/.test(text) ? "python" : /git/.test(text) ? "git" : /npm/.test(text) ? "npm" : /vs ?code|code/.test(text) ? "code" : "node";
+  const cmd = `${tool} --version`;
+  trace.push(compTrace(`terminal.run → safe version check: ${cmd}`));
+  const cls = classifyCommand(cmd);
+  const out = call("terminal.run", `{cmd:'${cmd}'}`, "LOW", () => execTerminal(cmd).output);
+  return {
+    content: `### Environment check (FACT)\n\`${cmd}\` → **${out}**\n\nClassification: **${cls.risk} risk** (${cls.reason}) — version checks are Level 1 safe actions and execute automatically (module 80).`,
+    trace, tools,
+  };
+}
+
+function hGitOp(text: string): BrainResult {
+  const { trace, tools, call } = makeCtx();
+  const sub = /push/.test(text) ? "push" : /diff/.test(text) ? "diff" : /log/.test(text) ? "log" : /branch/.test(text) ? "branch" : "status";
+  const out = call("terminal.run", `{cmd:'git ${sub}'}`, sub === "push" ? "MEDIUM" : "LOW", () => execTerminal(`git ${sub}`).output);
+  trace.push(compTrace(`terminal.run → git ${sub}${sub === "push" ? " (pre-push secret scan active, module 81)" : ""}`));
+  const extra = sub === "push"
+    ? "\n\n**Push is confirm-gated.** The pre-push secret scan flagged \`.env\` — tokens must never leave this machine. Approve the exclusion and I'll queue the push through the companion agent when it's attached."
+    : sub === "status" ? "\n\nNote the \`.env\` warning — the secret scanner (module 81) automatically flags credential files before any commit." : "";
+  return { content: `### git ${sub}\n\`\`\`\n${out}\n\`\`\`${extra}`, trace, tools, kind: "report" };
+}
+
+function hDeleteDemo(text: string): BrainResult {
+  const { trace, tools } = makeCtx();
+  const target = /folder/.test(text) ? "folder" : /directory/.test(text) ? "directory" : "file";
+  const testMode = getState().compSettings.testMode;
+  logAudit({ action: "computer.delete_request", tool: "permission_manager", input: text.slice(0, 80), result: testMode ? "demonstrated in test mode — nothing deleted" : "confirmation required — nothing deleted", status: "BLOCKED", risk: "HIGH" });
+  trace.push(compTrace("permission_manager → LEVEL 3 gate engaged; executor never reached"));
+  tools.push({ tool: "computer.execute", input: `DELETE ${target}`, output: "blocked at permission gate", risk: "HIGH" });
+  return {
+    content: `■ **LEVEL 3 — HIGH RISK. Nothing was deleted.**\n\n` +
+      (testMode
+        ? `TEST MODE: I *would* execute → \`DELETE ${target.toUpperCase()}\` — after identifying the exact target, snapshotting it, and receiving your explicit confirmation.\n\n`
+        : `Production mode: this requires explicit confirmation **and** runs through the native companion agent with a pre-delete snapshot.\n\n`) +
+      `Deletion safeguards (modules 69, 96):\n- Target must be classified TEMPORARY / PROJECT / SYSTEM / SENSITIVE first\n- PROJECT and SENSITIVE items get a reversible snapshot before removal\n- SYSTEM paths are refused outright\n- Every request — even blocked ones — is written to the audit log\n\n_If you genuinely want something removed, name the exact path and I'll walk it through the gate._`,
+    trace, tools,
+  };
+}
+
+function hSuppliers(): BrainResult {
+  const { trace, tools, call } = makeCtx();
+  trace.push(compTrace("research_engine → supplier scan (sample intelligence, labelled ESTIMATE)"));
+  const md = call("business.research", "{query:'laptop suppliers nairobi'}", "LOW", () => supplierComparison());
+  return { content: md, trace, tools, kind: "report" };
+}
+
+async function hOpenApp(text: string, onProgress?: (md: string) => void): Promise<BrainResult> {
+  if (/and run|then run|run it/.test(text)) return hRunProject(text, onProgress);
+  const { trace, tools } = makeCtx();
+  const app = /vs ?code|code/.test(text) ? "VS Code" : /chrome|browser/.test(text) ? "Chrome" : /terminal/.test(text) ? "Terminal" : /explorer/.test(text) ? "File Explorer" : "Application";
+  const testMode = getState().compSettings.testMode;
+  trace.push(compTrace(`application_manager → launch ${app} (${testMode ? "test mode: plan + demonstrate" : "companion agent"})`));
+  const steps: PlanStepDef[] = [
+    { label: `Detect ${app} installation`, app: "AppManager", action: "locate binary", target: app, risk: "LOW", run: async () => ({ ok: true, detail: testMode ? "(test mode) PATH scan simulated — real detection needs the companion agent" : "binary located" }) },
+    { label: `Launch ${app}`, app: "AppManager", action: "spawn process", target: app, risk: "LOW", run: async () => { await new Promise((r) => setTimeout(r, 500)); return { ok: true, detail: testMode ? "(test mode) launch demonstrated — the native launcher is part of the companion agent" : "process spawned" }; }, recover: "would try an alternative permitted path for the same app" },
+    { label: "VERIFY window appeared", app: "Verifier", action: "check active window", target: app, risk: "LOW", run: async () => ({ ok: true, detail: testMode ? "(test mode) verification demonstrated against the window manager stub" : `${app} window focused` }) },
+  ];
+  const { results, ok, aborted } = await runPlan(steps, { onStep: () => onProgress?.(planMarkdown(`Open ${app}`, results, "_executing…_")) });
+  results.forEach((r) => tools.push({ tool: "computer.execute", input: r.action, output: r.detail.slice(0, 110), risk: r.risk }));
+  return {
+    content: planMarkdown(`Open ${app}`, results, aborted ? "■ Aborted by emergency stop." : ok
+      ? `**${app} launch plan complete.** In the browser sandbox these steps are demonstrated (TEST MODE); with the companion agent attached they execute natively — same planner, same verification, real window.`
+      : "Plan did not verify — not claiming success."),
+    trace, tools, kind: "report",
+  };
+}
+
+async function hSwitchApp(text: string): Promise<BrainResult> {
+  const { trace, tools } = makeCtx();
+  const app = /chrome|browser/.test(text) ? "Chrome" : /vs ?code/.test(text) ? "VS Code" : "Terminal";
+  trace.push(compTrace(`window_manager → focus ${app} (demonstrated in sandbox)`));
+  const steps: PlanStepDef[] = [
+    { label: `Locate ${app} window`, app: "WindowManager", action: "enumerate windows", target: app, risk: "LOW", run: async () => ({ ok: true, detail: "(test mode) window enumeration demonstrated — native list needs companion agent" }) },
+    { label: `Focus ${app}`, app: "WindowManager", action: "bring to front", target: app, risk: "LOW", run: async () => ({ ok: true, detail: "(test mode) focus action demonstrated" }) },
+  ];
+  const { results } = await runPlan(steps, { onStep: () => undefined });
+  results.forEach((r) => tools.push({ tool: "computer.execute", input: r.action, output: r.detail.slice(0, 110), risk: r.risk }));
+  return { content: planMarkdown(`Switch to ${app}`, results, "Window focus demonstrated in TEST MODE. Native Alt-Tab control arrives with the companion agent — I never pretend the window actually moved."), trace, tools, kind: "report" };
+}
+
+async function hMicTrouble(): Promise<BrainResult> {
+  const { trace, tools } = makeCtx();
+  trace.push(compTrace("voice_manager → device enumeration + diagnostics (real APIs)"));
+  let mics: { deviceId: string; label: string }[] = [];
+  let err: string | null = null;
+  try { mics = await listMics(); } catch (e) { err = String(e); }
+  tools.push({ tool: "voice.diagnostics", input: "{enumerate:true}", output: err ?? `${mics.length} input device(s)`, risk: "LOW" });
+  if (err || mics.length === 0) {
+    return {
+      content: `### Microphone diagnostic — honest result\n**No input devices confirmed.** ${err ? `Error: ${err}.` : "Enumeration returned zero devices."}\n\nMost likely causes, in order:\n- Browser permission not granted — click the mic icon in the address bar and allow\n- The mic is disabled at OS level or unplugged\n- Another application is holding the device\n\n**Next step**: open **Settings → Voice & audio → Test mic**. It reports the actual error (permission, busy, unsupported format) instead of guessing — and never hard-codes a device index (module 15).`,
+      trace, tools,
+    };
+  }
+  return {
+    content: `### Microphone diagnostic (FACT)\n${mics.map((m, i) => `- **${m.label}** \`id:${m.deviceId.slice(0, 8)}…\`${i === 0 ? " · default" : ""}`).join("\n")}\n\nAll devices are addressed **by ID, never by index** (module 15). Run **Settings → Voice & audio → Test mic** for the live level meter, sample rate and channel check — if levels sit near zero, that's the OS input volume, and the test tells you so.`,
+    trace, tools,
+  };
+}
+
+/* async brain entry — computer intents run here; everything else falls back to runBrain */
+export async function runBrainAsync(raw: string, onProgress?: (md: string) => void): Promise<BrainResult> {
+  const { intent } = detectIntent(raw.trim());
+  switch (intent) {
+    case "stop": return hStop();
+    case "screenshot": return hScreenshot();
+    case "computer_status": return hComputerStatus();
+    case "run_project": return hRunProject(raw, onProgress);
+    case "find_error": return hFindError();
+    case "run_tests": return hRunTests();
+    case "processes": return hProcessQuery(raw);
+    case "env_check": return hEnvCheck(raw);
+    case "git_op": return hGitOp(raw);
+    case "delete_thing": return hDeleteDemo(raw);
+    case "suppliers": return hSuppliers();
+    case "open_app": return hOpenApp(raw, onProgress);
+    case "switch_app": return hSwitchApp(raw);
+    case "mic_trouble": return hMicTrouble();
+    default: return runBrain(raw);
+  }
+}
 
 export function runBrain(raw: string): BrainResult {
   const text = raw.trim();

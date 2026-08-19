@@ -6,7 +6,7 @@
 import { useSyncExternalStore } from "react";
 import type {
   AppState, AppEvent, AuditEntry, Notification, Product, Sale, Risk, Severity,
-  HealthCheck, Memory, Task,
+  HealthCheck, Memory, Task, CompAction, Capture, DevService,
 } from "./types";
 import { buildSeed, SEED_VERSION } from "./seed";
 
@@ -20,7 +20,16 @@ function load(): AppState {
     const raw = localStorage.getItem(KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as AppState;
-      if (parsed.version === SEED_VERSION && Array.isArray(parsed.products)) return parsed;
+      if (parsed.version === SEED_VERSION && Array.isArray(parsed.products)) {
+        // forward-compatible merge: older persisted states gain new subsystem fields
+        const fallbacks = {
+          compActions: [] as AppState["compActions"],
+          devServices: [] as AppState["devServices"],
+          captures: [] as AppState["captures"],
+          compSettings: { testMode: true, retention: 20, autoTimeoutMs: 8000 },
+        };
+        return { ...fallbacks, ...parsed, compSettings: { ...fallbacks.compSettings, ...(parsed.compSettings ?? {}) } };
+      }
     }
   } catch { /* corrupted state → reseed */ }
   return buildSeed();
@@ -332,6 +341,59 @@ export function clearChat() {
 
 export function updateSettings(patch: Partial<AppState["settings"]>) {
   mutate((s) => { s.settings = { ...s.settings, ...patch }; });
+}
+
+/* ---------------- computer-control persistence ---------------- */
+
+export function updateCompSettings(patch: Partial<AppState["compSettings"]>) {
+  mutate((s) => { s.compSettings = { ...s.compSettings, ...patch }; });
+}
+
+export function logCompAction(entry: Omit<CompAction, "id" | "ts">) {
+  mutate((s) => {
+    s.compActions = [{ id: uid(), ts: Date.now(), ...entry }, ...s.compActions].slice(0, 300);
+  });
+  logAudit({
+    action: `computer.${entry.app.toLowerCase().replace(/\s+/g, "_")}`,
+    tool: "computer_controller",
+    input: `${entry.action} → ${entry.target}`.slice(0, 90),
+    result: entry.result.slice(0, 120),
+    status: entry.ok ? "SUCCESS" : "FAILED",
+    risk: entry.risk,
+  });
+}
+
+export function addCapture(c: Omit<Capture, "id" | "ts">): Capture {
+  const cap: Capture = { id: uid(), ts: Date.now(), ...c };
+  mutate((s) => {
+    s.captures = [cap, ...s.captures].slice(0, s.compSettings.retention);
+  });
+  return cap;
+}
+export function clearCaptures() {
+  const n = getState().captures.length;
+  mutate((s) => { s.captures = []; });
+  logAudit({ action: "computer.clear_captures", tool: "screen_capture", result: `${n} screenshots discarded (privacy retention)`, status: "SUCCESS", risk: "MEDIUM", confirmed: true });
+  return n;
+}
+
+export function upsertDevService(svc: DevService) {
+  mutate((s) => {
+    const i = s.devServices.findIndex((x) => x.id === svc.id);
+    if (i >= 0) s.devServices = s.devServices.map((x) => (x.id === svc.id ? svc : x));
+    else s.devServices = [svc, ...s.devServices];
+  });
+}
+export function appendServiceLog(id: string, line: string) {
+  mutate((s) => {
+    s.devServices = s.devServices.map((x) =>
+      x.id === id ? { ...x, log: [...x.log.slice(-60), line] } : x,
+    );
+  });
+  bus.emit("comp:log", id);
+}
+export function removeDevService(id: string) {
+  mutate((s) => { s.devServices = s.devServices.filter((x) => x.id !== id); });
 }
 
 export function updateIntegration(id: string, patch: Partial<AppState["integrations"][number]>) {

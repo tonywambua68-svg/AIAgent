@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChatMsg } from "../lib/types";
 import { useStore, pushChat, patchChat, uid, logAudit, bus } from "../lib/store";
-import { runBrain, confirmAction, denyAction, type BrainResult } from "../lib/brain";
+import { runBrainAsync, confirmAction, denyAction, type BrainResult } from "../lib/brain";
 import { startRecognition, speak, speechSupported } from "../lib/voice";
 import { sfx } from "../lib/audio";
 import { Md, Badge, Logo, IcSend, IcMic, IcChevD, IcZap, IcCheck, IcX } from "./ui";
@@ -133,22 +133,32 @@ export default function CommandCenter() {
       if (i < STAGES.length) { setStage(i); sfx.tick(); }
       else {
         clearInterval(iv);
-        try {
-          const result = runBrain(text);
-          const msg = storeResult(result);
-          setLastId(msg.id);
-          if (s.settings.ttsOn && msg.role === "assistant") speak(msg.content, s.settings.ttsVoice);
-        } catch (err) {
-          logAudit({ action: "brain.error", tool: "jarvis_brain", input: text.slice(0, 60), result: String(err), status: "FAILED", risk: "LOW" });
-          pushChat({
-            id: uid(), role: "assistant", ts: Date.now(),
-            content: `### Processing error — told honestly\nThe engine threw: \`${String(err)}\`. Nothing was executed or recorded. Try rephrasing, or run _"check system health"_.`,
-            trace: [{ stage: "ERROR", detail: "exception caught and surfaced, not hidden" }], tools: [],
-          });
-          sfx.error();
-        }
-        setStage(-1);
-        setBusy(false);
+        (async () => {
+          // placeholder message — computer-control plans stream step results into it live
+          const msgId = uid();
+          pushChat({ id: msgId, role: "assistant", ts: Date.now(), content: "_observing → planning → executing…_", kind: "text" });
+          try {
+            const result = await runBrainAsync(text, (md) => patchChat(msgId, { content: md }));
+            patchChat(msgId, {
+              content: result.content,
+              trace: result.trace, tools: result.tools,
+              kind: result.kind ?? "text",
+              ...(result.pending ? { pending: result.pending } : {}),
+            });
+            setLastId(msgId);
+            if (s.settings.ttsOn) speak(result.content, s.settings.ttsVoice);
+          } catch (err) {
+            logAudit({ action: "brain.error", tool: "jarvis_brain", input: text.slice(0, 60), result: String(err), status: "FAILED", risk: "LOW" });
+            patchChat(msgId, {
+              content: `### Processing error — told honestly\nThe engine threw: \`${String(err)}\`. Nothing was executed or recorded. Try rephrasing, or run _"check system health"_.`,
+              trace: [{ stage: "ERROR", detail: "exception caught and surfaced, not hidden" }], tools: [],
+            });
+            sfx.error();
+          } finally {
+            setStage(-1);
+            setBusy(false);
+          }
+        })();
       }
     }, 85);
   }

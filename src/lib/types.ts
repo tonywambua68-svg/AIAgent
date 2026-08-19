@@ -188,6 +188,49 @@ export interface Competitor {
   weakness: string;
 }
 
+/* ---------- computer-control subsystem (modules 60-96) ---------- */
+
+export type PermLevel = 0 | 1 | 2 | 3;
+
+export interface CompAction {
+  id: ID;
+  ts: number;
+  app: string;        // target application / subsystem
+  action: string;     // what was attempted
+  target: string;     // element / file / url / command
+  result: string;     // observed outcome
+  ok: boolean;
+  risk: Risk;
+  level: PermLevel;   // 0 OBSERVE · 1 SAFE · 2 MODIFY · 3 HIGH
+  testMode: boolean;
+}
+
+export interface DevService {
+  id: ID;
+  name: string;
+  cmd: string;
+  port: number;
+  status: "running" | "stopped";
+  startedAt?: number;
+  log: string[];
+}
+
+export interface Capture {
+  id: ID;
+  ts: number;
+  kind: "screen" | "window" | "tab";
+  label: string;
+  dataUrl: string;
+  w: number;
+  h: number;
+}
+
+export interface CompSettings {
+  testMode: boolean;      // demonstrate plans instead of executing natively
+  retention: number;      // max stored screenshots
+  autoTimeoutMs: number;  // per-action timeout
+}
+
 export interface Settings {
   userName: string;
   soundOn: boolean;
@@ -227,4 +270,8 @@ export interface AppState {
   opportunities: Opportunity[];
   sessionId: string;
   bootedAt: number;
+  compActions: CompAction[];
+  devServices: DevService[];
+  captures: Capture[];
+  compSettings: CompSettings;
 }
