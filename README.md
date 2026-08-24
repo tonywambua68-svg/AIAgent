@@ -94,6 +94,24 @@ No secrets in source. Credentials are masked after storage and flagged as dev-mo
 HIGH-risk actions (memory wipe, factory reset, price changes) require explicit confirmation and
 are audit-logged with `confirmed: true`. Destructive operations are never performed silently.
 
+## Voice Link — two-way conversation
+
+The floating orb (bottom-right, every section) opens a full-duplex voice channel:
+mic → speech-to-text → brain → tools → spoken response → auto-resume listening.
+- **Continuous mode** (toggle in the panel) keeps the conversation rolling; disable it for one command per tap.
+- **Barge-in**: start speaking and JARVIS stops mid-sentence.
+- **"JARVIS stop"** by voice triggers the computer-control emergency stop.
+- Mic failures (permission, busy device, unsupported browser) are reported honestly in the panel.
+- Every exchange is mirrored into the Command Center transcript with full trace/tools.
+
+## Running as its own app
+
+JARVIS OS is an installable PWA — it opens in its own window with its own icon, not a browser tab:
+- Topbar → **Install app** (uses the browser's native `beforeinstallprompt`; shows **APP MODE** once installed / launched via "Add to Home Screen").
+- Topbar → **Open app** opens a dedicated popup window right now, no install needed.
+- `public/manifest.webmanifest` declares `display: standalone`; `public/sw.js` caches the app shell so the installed app launches offline.
+- The service worker registers in production builds only (`import.meta.env.PROD`).
+
 ## Computer Control subsystem (modules 60-96)
 
 New section: **Computer** in the sidebar, driven by `src/lib/computer.ts`.

@@ -240,6 +240,7 @@ export interface Settings {
   micDeviceId?: string;
   simOn: boolean;
   simIntervalSec: number;
+  voiceContinuous?: boolean;  // Voice Link: auto-resume listening after JARVIS speaks
 }
 
 export interface HealthCheck {

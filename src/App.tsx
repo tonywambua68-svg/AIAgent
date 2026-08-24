@@ -1,7 +1,7 @@
 /* J.A.R.V.I.S OS — shell: boot sequence, navigation, topbar, activity rail, event wiring */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { HealthCheck } from "./lib/types";
-import { useStore, bus, runHealth, overallHealth, markAllRead, recordSale, fmtAgo, fmtTime, getState, updateSettings } from "./lib/store";
+import { useStore, bus, runHealth, overallHealth, markAllRead, recordSale, fmtAgo, fmtTime, getState, updateSettings, logEvent } from "./lib/store";
 import { startSim } from "./lib/sim";
 import { sfx, setVolume, setMuted, primeAudio } from "./lib/audio";
 import CommandCenter from "./components/CommandCenter";
@@ -9,11 +9,12 @@ import Business from "./components/Business";
 import { ProjectsSection, TasksSection, LearningSection } from "./components/Operations";
 import Analytics from "./components/Analytics";
 import ComputerControl from "./components/ComputerControl";
+import VoiceLink from "./components/VoiceLink";
 import { MemorySection, IntegrationsSection, SecuritySection, SettingsSection } from "./components/System";
 import { emergencyStop, isPlanRunning } from "./lib/computer";
 import {
   Logo, Badge, IcTerminal, IcStore, IcFolder, IcCheck, IcBook, IcChart, IcDb, IcPlug,
-  IcShield, IcGear, IcBell, IcVol, IcVolX, IcMenu, IcX, IcZap, IcPlay, IcMic, IcChip,
+  IcShield, IcGear, IcBell, IcVol, IcVolX, IcMenu, IcX, IcZap, IcPlay, IcMic, IcChip, IcMonitor,
 } from "./components/ui";
 
 type SectionId = "command" | "business" | "projects" | "tasks" | "learning" | "analytics" | "computer" | "memory" | "integrations" | "security" | "settings";
@@ -47,6 +48,8 @@ const BOOT_LINES = [
   "▸ business_manager ....... 12 SKUs · ledger verified      [ OK ]",
   "▸ integrations ........... 7 adapters · MOCK/OFF mode     [WARN]",
   "▸ voice_system ........... Web Speech API probe           [ OK ]",
+  "▸ voice_link ............. duplex conversation armed      [ OK ]",
+  "▸ app_shell .............. installable · offline cache    [ OK ]",
   "▸ audit_logger ........... history attached               [ OK ]",
   "▸ dashboard .............. ONLINE",
 ];
@@ -173,6 +176,13 @@ function ActivityRail({ onNavigate }: { onNavigate: (s: SectionId) => void }) {
   );
 }
 
+/* ---------------- own-app install (PWA beforeinstallprompt) ---------------- */
+
+interface BIPEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+}
+
 /* ---------------- shell ---------------- */
 
 export default function App() {
@@ -184,7 +194,18 @@ export default function App() {
   const [navOpen, setNavOpen] = useState(false);
   const [railOpen, setRailOpen] = useState(false);
   const [soundOpen, setSoundOpen] = useState(false);
+  const [installEvt, setInstallEvt] = useState<BIPEvent | null>(null);
+  const [appInstalled, setAppInstalled] = useState(() => window.matchMedia("(display-mode: standalone)").matches);
   const lastSaleAt = useRef(0);
+
+  /* own-app support: capture the browser's install prompt (PWA) */
+  useEffect(() => {
+    const onBip = (e: Event) => { e.preventDefault(); setInstallEvt(e as BIPEvent); };
+    const onInstalled = () => { setAppInstalled(true); setInstallEvt(null); logEvent("SYSTEM", "JARVIS OS installed — now launches as its own app", "success"); };
+    window.addEventListener("beforeinstallprompt", onBip);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => { window.removeEventListener("beforeinstallprompt", onBip); window.removeEventListener("appinstalled", onInstalled); };
+  }, []);
 
   /* clock */
   useEffect(() => {
@@ -326,6 +347,33 @@ export default function App() {
             )}
           </div>
 
+          {/* own-app launcher */}
+          {appInstalled ? (
+            <Badge tone="acc" className="hidden sm:inline-flex">
+              <span className="w-1.5 h-1.5 rounded-full bg-acc pulse-dot" /> APP MODE
+            </Badge>
+          ) : installEvt ? (
+            <button className="btn-ghost !px-2.5 !py-2 hidden sm:flex items-center gap-1.5 !text-acc !border-acc/40"
+              title="Install JARVIS OS — it will launch in its own window"
+              onClick={async () => {
+                await installEvt.prompt();
+                const choice = await installEvt.userChoice;
+                if (choice.outcome === "accepted") logEvent("SYSTEM", "Install accepted — JARVIS will open as a standalone app", "success");
+                setInstallEvt(null);
+              }}>
+              <IcChip size={13} /> Install app
+            </button>
+          ) : (
+            <button className="btn-ghost !px-2.5 !py-2 hidden sm:flex items-center gap-1.5"
+              title="Open JARVIS in its own dedicated window"
+              onClick={() => {
+                window.open(window.location.href, "jarvis_os", "popup=yes,width=1400,height=900");
+                logEvent("SYSTEM", "Opened JARVIS in a dedicated app window", "info");
+              }}>
+              <IcMonitor size={13} /> Open app
+            </button>
+          )}
+
           {/* alerts */}
           <button className="relative btn-ghost !px-2.5 !py-2 xl:hidden" onClick={() => setRailOpen(true)} aria-label="Alerts">
             <IcBell size={15} />
@@ -383,6 +431,9 @@ export default function App() {
 
         {/* activity rail (desktop) */}
         <div className="hidden xl:flex"><ActivityRail onNavigate={navigate} /></div>
+
+        {/* floating voice link — talk to JARVIS from any section */}
+        <VoiceLink />
 
         {/* activity rail (mobile drawer) */}
         {railOpen && (
